@@ -29,6 +29,8 @@
 
 #define WPANUSB_VALID_CHANNELS	(0x07FFFFFF)
 
+#define DEFAULT_LBT_DURATION_US	1000	/* Default LBT duration in microseconds */
+
 struct wpanusb {
 	struct ieee802154_hw *hw;
 	struct usb_device *udev;
@@ -544,10 +546,58 @@ static int wpanusb_set_txpower(struct ieee802154_hw *hw, s32 mbm)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_txpower req = { 0 };
+	int i, ret;
+	s32 best_power = S32_MAX;
+	s32 min_diff = S32_MAX;
 
-	dev_err(&udev->dev, "%s: Not handled, mbm %d", __func__, mbm);
+	/* Validate that we have supported power levels */
+	if (!hw->phy->supported.tx_powers || hw->phy->supported.tx_powers_size == 0) {
+		dev_err(&udev->dev, "No supported TX power levels available\n");
+		return -EINVAL;
+	}
 
-	return -ENOTSUPP;
+	/*
+	 * Find the closest supported power level. Iterate through the
+	 * supported tx_powers array and find the value with the minimum
+	 * absolute difference from the requested power level.
+	 */
+	for (i = 0; i < hw->phy->supported.tx_powers_size; i++) {
+		s32 supported_power = hw->phy->supported.tx_powers[i];
+		s32 diff = abs(mbm - supported_power);
+
+		if (diff < min_diff) {
+			min_diff = diff;
+			best_power = supported_power;
+		}
+	}
+
+	/* This should never happen due to the validation above, but be safe */
+	if (best_power == S32_MAX) {
+		dev_err(&udev->dev, "Failed to find valid TX power level\n");
+		return -EINVAL;
+	}
+
+	dev_dbg(&udev->dev, "requested txpower %d mbm, selected %d mbm\n",
+		mbm, best_power);
+
+	/* Populate the request structure with the chosen power level */
+	req.power_mbm = cpu_to_le32(best_power);
+
+	/* Send the command to the device */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_TXPOWER, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set TX power, ret %d\n", ret);
+		return ret;
+	}
+
+	/* Update the current transmit power in the phy struct on success */
+	hw->phy->transmit_power = best_power;
+
+	dev_dbg(&udev->dev, "TX power set to %d mbm\n", best_power);
+
+	return 0;
 }
 
 static int wpanusb_set_cca_mode(struct ieee802154_hw *hw,
@@ -577,26 +627,62 @@ static int wpanusb_set_lbt(struct ieee802154_hw *hw, bool on)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
-	int ret = 0;
+	struct set_lbt req = { 0 };
+	int ret;
 
-	if (on)
-		ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-				   SET_LBT, NULL, 0);
+	req.enable = on ? 1 : 0;
+	req.duration = cpu_to_le16(on ? DEFAULT_LBT_DURATION_US : 0);
 
-	return ret;
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_LBT, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set LBT state to %s, ret %d",
+			on ? "ON" : "OFF", ret);
+		return ret;
+	}
+
+	if (on) {
+		dev_dbg(&udev->dev, "LBT enabled with duration: %u us",
+			DEFAULT_LBT_DURATION_US);
+	} else {
+		dev_dbg(&udev->dev, "LBT disabled");
+	}
+
+	return 0;
 }
 
 static int wpanusb_set_frame_retries(struct ieee802154_hw *hw, s8 retries)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_frame_retries req = { 0 };
 	int ret;
 
-	/* FIXME pass retries onwards to device */
-	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-				   SET_FRAME_RETRIES, NULL, 0);
+	/*
+	 * Validate input: The IEEE 802.15.4 standard specifies
+	 * aMacMaxFrameRetries can range from 0 to 7.
+	 */
+	if (retries < 0 || retries > 7) {
+		dev_err(&udev->dev, "Invalid frame retries count %d, must be 0-7\n",
+			retries);
+		return -EINVAL;
+	}
 
-	return ret;
+	/* Populate the request structure. */
+	req.retries = (u8)retries;
+
+	/* Send the command and data to the device. */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_FRAME_RETRIES, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set frame retries, ret %d\n",
+			ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "Frame retries set to %d\n", retries);
+
+	return 0;
 }
 
 static int wpanusb_set_cca_ed_level(struct ieee802154_hw *hw, s32 mbm)

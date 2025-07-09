@@ -52,3 +52,17 @@ struct set_ieee_addr {
 	__le64 ieee_addr;
 } __packed;
 
+struct set_lbt {
+	__u8 enable;        /* 0 = disable, 1 = enable */
+	__u8 reserved;      /* padding for alignment */
+	__le16 duration;    /* LBT duration in microseconds */
+} __packed;
+
+struct set_frame_retries {
+	__u8 retries;       /* Number of frame retries (0-7) */
+} __packed;
+
+struct set_txpower {
+	__le32 power_mbm;   /* TX power in milliwatts */
+} __packed;
+
