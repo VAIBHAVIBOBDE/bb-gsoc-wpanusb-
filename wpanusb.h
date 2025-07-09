@@ -66,3 +66,22 @@ struct set_txpower {
 	__le32 power_mbm;   /* TX power in milliwatts */
 } __packed;
 
+struct set_cca_mode {
+	__u8 mode;          /* CCA mode (energy/carrier/both) */
+	__u8 opt;           /* CCA option parameter */
+} __packed;
+
+struct set_cca_ed_level {
+	__le32 level_mbm;   /* CCA ED level in milliwatts */
+} __packed;
+
+struct set_csma_params {
+	__u8 min_be;        /* Minimum backoff exponent (0-5) */
+	__u8 max_be;        /* Maximum backoff exponent (0-5) */
+	__u8 retries;       /* CSMA retries (0-7) */
+} __packed;
+
+struct set_promiscuous_mode {
+	__u8 enable;        /* 0 = disable, 1 = enable promiscuous mode */
+} __packed;
+

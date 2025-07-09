@@ -605,20 +605,41 @@ static int wpanusb_set_cca_mode(struct ieee802154_hw *hw,
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_cca_mode req = { 0 };
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, mode %u opt %u",
-		__func__, cca->mode, cca->opt);
-
+	/*
+	 * Validate the CCA mode. The switch statement ensures only supported
+	 * modes are processed.
+	 */
 	switch (cca->mode) {
 	case NL802154_CCA_ENERGY:
-		break;
 	case NL802154_CCA_CARRIER:
-		break;
 	case NL802154_CCA_ENERGY_CARRIER:
+		/* Mode is supported, break to continue processing. */
 		break;
 	default:
+		dev_err(&udev->dev, "CCA mode %u not supported\n", cca->mode);
 		return -EINVAL;
 	}
+
+	dev_dbg(&udev->dev, "Setting CCA mode to %u with option %u\n",
+		cca->mode, cca->opt);
+
+	/* Populate the request with the CCA parameters. */
+	req.mode = (u8)cca->mode;
+	req.opt = (u8)cca->opt;
+
+	/* Send the command and data to the device. */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CCA_MODE, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CCA mode, ret %d\n", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CCA mode set to %u with option %u\n",
+		cca->mode, cca->opt);
 
 	return 0;
 }
@@ -689,8 +710,36 @@ static int wpanusb_set_cca_ed_level(struct ieee802154_hw *hw, s32 mbm)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_cca_ed_level req = { 0 };
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, mbm %d", __func__, mbm);
+	/*
+	 * Validate the energy detection threshold. The parameter is in
+	 * milliwatts (mbm). For typical 802.15.4 operation, this corresponds
+	 * to roughly -85 to -40 dBm range. We set a conservative range here.
+	 * Note: Negative values represent very small power levels.
+	 */
+	if (mbm < -10000 || mbm > 0) {
+		dev_err(&udev->dev,
+			"Invalid CCA ED level %d mbm, must be between -10000 and 0\n",
+			mbm);
+		return -EINVAL;
+	}
+
+	dev_dbg(&udev->dev, "Setting CCA ED level to %d mbm\n", mbm);
+
+	/* Populate the request with the ED level. */
+	req.level_mbm = cpu_to_le32(mbm);
+
+	/* Send the command and data to the device. */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CCA_ED_LEVEL, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CCA ED level, ret %d\n", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CCA ED level set to %d mbm\n", mbm);
 
 	return 0;
 }
@@ -700,9 +749,42 @@ static int wpanusb_set_csma_params(struct ieee802154_hw *hw, u8 min_be,
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_csma_params req = { 0 };
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, min_be %u max_be %u retr %u",
-		__func__, min_be, max_be, retries);
+	/*
+	 * Validate parameters according to IEEE 802.15.4 standard:
+	 * - macMinBE, macMaxBE: 0-5 (IEEE 802.15.4 limit is 5, not 8)
+	 * - min_be <= max_be (logical requirement)
+	 * - retries: 0-7 (macMaxCSMABackoffs, driver-specific limit)
+	 */
+	if (min_be > 5 || max_be > 5 || min_be > max_be || retries > 7) {
+		dev_err(&udev->dev,
+			"Invalid CSMA params: min_be=%u, max_be=%u, retries=%u\n",
+			min_be, max_be, retries);
+		dev_err(&udev->dev,
+			"Valid ranges: min_be/max_be (0-5), retries (0-7), min_be <= max_be\n");
+		return -EINVAL;
+	}
+
+	dev_dbg(&udev->dev, "Setting CSMA params: min_be=%u, max_be=%u, retries=%u\n",
+		min_be, max_be, retries);
+
+	/* Populate the request with the CSMA parameters. */
+	req.min_be = min_be;
+	req.max_be = max_be;
+	req.retries = retries;
+
+	/* Send the command and data to the device. */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CSMA_PARAMS, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CSMA params, ret %d\n", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CSMA params set: min_be=%u, max_be=%u, retries=%u\n",
+		min_be, max_be, retries);
 
 	return 0;
 }
@@ -711,8 +793,26 @@ static int wpanusb_set_promiscuous_mode(struct ieee802154_hw *hw, const bool on)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_promiscuous_mode req = { 0 };
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, on %d", __func__, on);
+	dev_dbg(&udev->dev, "Setting promiscuous mode to %s\n",
+		on ? "ON" : "OFF");
+
+	/* Populate the request. Use 1 for true (on) and 0 for false (off). */
+	req.enable = on ? 1 : 0;
+
+	/* Send the command and data to the device. */
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_PROMISCUOUS_MODE, &req, sizeof(req));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set promiscuous mode, ret %d\n",
+			ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "Promiscuous mode set to %s\n",
+		on ? "ON" : "OFF");
 
 	return 0;
 }
