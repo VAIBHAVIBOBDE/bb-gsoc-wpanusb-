@@ -635,9 +635,21 @@ static int wpanusb_set_cca_ed_level(struct ieee802154_hw *hw, s32 mbm)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_cca_ed_level req;
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, mbm %d", __func__, mbm);
+	req.level_mbm = cpu_to_le32(mbm);
 
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CCA_ED_LEVEL, &req, sizeof(req));
+	
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CCA ED level to %d mbm, ret %d",
+			mbm, ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CCA ED level set to %d mbm", mbm);
 	return 0;
 }
 
@@ -646,10 +658,30 @@ static int wpanusb_set_csma_params(struct ieee802154_hw *hw, u8 min_be,
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_csma_params req;
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, min_be %u max_be %u retr %u",
-		__func__, min_be, max_be, retries);
+	/* IEEE 802.15.4 parameter validation */
+	if (min_be > 8 || max_be > 8 || min_be > max_be || retries > 7) {
+		dev_err(&udev->dev, "Invalid CSMA params: min_be=%u max_be=%u retries=%u",
+			min_be, max_be, retries);
+		return -EINVAL;
+	}
 
+	req.min_be = min_be;
+	req.max_be = max_be;
+	req.retries = retries;
+
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CSMA_PARAMS, &req, sizeof(req));
+	
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CSMA params, ret %d", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CSMA params set: min_be=%u max_be=%u retries=%u",
+		min_be, max_be, retries);
 	return 0;
 }
 
