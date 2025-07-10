@@ -1,0 +1,71 @@
+name: IEEE 802.15.4 WPANUSB CI
+
+on:
+  push:
+    branches: [ main, beagleconnect, develop ]
+  pull_request:
+    branches: [ main, beagleconnect ]
+
+jobs:
+  build-and-test:
+    name: Build and Test
+    runs-on: ubuntu-latest
+    
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+      
+    - name: Install Dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y \
+          linux-headers-$(uname -r) \
+          build-essential \
+          kmod
+        
+    - name: Build Module
+      run: |
+        make clean
+        make
+        
+    - name: Verify Build
+      run: |
+        # Check if module was built successfully
+        if [ ! -f wpanusb.ko ]; then
+          echo "ERROR: Module build failed"
+          exit 1
+        fi
+        echo "Module built successfully"
+        ls -la wpanusb.ko
+        
+    - name: Module Info Check
+      run: |
+        # Display module information
+        modinfo wpanusb.ko
+        
+    - name: Basic Module Test
+      run: |
+        # Load required kernel modules first
+        sudo modprobe ieee802154 || echo "ieee802154 module not available"
+        sudo modprobe mac802154 || echo "mac802154 module not available"
+        
+        # Test our module loading
+        sudo insmod wpanusb.ko || echo "Module load failed - expected without hardware"
+        
+        # Check if module is loaded
+        lsmod | grep wpanusb && echo "Module loaded successfully" || echo "Module not loaded"
+        
+        # Check kernel messages
+        dmesg | tail -5 || true
+        
+        # Try to unload module
+        sudo rmmod wpanusb || echo "Module unload failed"
+        
+    - name: Upload Build Artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: wpanusb-module
+        path: |
+          wpanusb.ko
+          wpanusb.mod.c
+          Module.symvers
