@@ -546,10 +546,36 @@ static int wpanusb_set_txpower(struct ieee802154_hw *hw, s32 mbm)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_txpower req;
+	int ret, i;
+	bool power_supported = false;
 
-	dev_err(&udev->dev, "%s: Not handled, mbm %d", __func__, mbm);
+	/* Validate power level against supported values */
+	for (i = 0; i < hw->phy->supported.tx_powers_size; i++) {
+		if (hw->phy->supported.tx_powers[i] == mbm) {
+			power_supported = true;
+			break;
+		}
+	}
 
-	return -ENOTSUPP;
+	if (!power_supported) {
+		dev_err(&udev->dev, "Unsupported TX power %d mbm", mbm);
+		return -EINVAL;
+	}
+
+	req.power_mbm = cpu_to_le32(mbm);
+
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_TXPOWER, &req, sizeof(req));
+	
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set TX power to %d mbm, ret %d", 
+			mbm, ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "TX power set to %d mbm", mbm);
+	return 0;
 }
 
 static int wpanusb_set_cca_mode(struct ieee802154_hw *hw,
@@ -557,21 +583,38 @@ static int wpanusb_set_cca_mode(struct ieee802154_hw *hw,
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_cca_mode req;
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, mode %u opt %u",
-		__func__, cca->mode, cca->opt);
+	req.mode = cca->mode;
+	req.opt = cca->opt;
 
 	switch (cca->mode) {
 	case NL802154_CCA_ENERGY:
+		dev_dbg(&udev->dev, "Setting CCA mode to Energy Detection");
 		break;
 	case NL802154_CCA_CARRIER:
+		dev_dbg(&udev->dev, "Setting CCA mode to Carrier Sense");
 		break;
 	case NL802154_CCA_ENERGY_CARRIER:
+		dev_dbg(&udev->dev, "Setting CCA mode to Energy + Carrier");
 		break;
 	default:
+		dev_err(&udev->dev, "Unsupported CCA mode: %d", cca->mode);
 		return -EINVAL;
 	}
 
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_CCA_MODE, &req, sizeof(req));
+	
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set CCA mode %u opt %u, ret %d",
+			cca->mode, cca->opt, ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "CCA mode set to %u with option %u", 
+		cca->mode, cca->opt);
 	return 0;
 }
 
