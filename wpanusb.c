@@ -607,7 +607,7 @@ static int wpanusb_set_frame_retries(struct ieee802154_hw *hw, s8 retries)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
-	struct set_frame_retries *req;
+	struct set_frame_retries req;
 	int ret;
 
 	/* IEEE 802.15.4 standard: retries must be 0-7 */
@@ -616,15 +616,10 @@ static int wpanusb_set_frame_retries(struct ieee802154_hw *hw, s8 retries)
 		return -EINVAL;
 	}
 
-	req = kmalloc(sizeof(*req), GFP_KERNEL);
-	if (!req)
-		return -ENOMEM;
-
-	req->retries = (u8)retries;
+	req.retries = (u8)retries;
 
 	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-				   SET_FRAME_RETRIES, req, sizeof(*req));
-	kfree(req);
+				   SET_FRAME_RETRIES, &req, sizeof(req));
 	
 	if (ret < 0) {
 		dev_err(&udev->dev, "Failed to set frame retries to %d, ret %d", 
@@ -662,9 +657,21 @@ static int wpanusb_set_promiscuous_mode(struct ieee802154_hw *hw, const bool on)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
+	struct set_promiscuous_mode req;
+	int ret;
 
-	dev_err(&udev->dev, "%s: Not handled, on %d", __func__, on);
+	req.enable = on ? 1 : 0;
 
+	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+				   SET_PROMISCUOUS_MODE, &req, sizeof(req));
+	
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to set promiscuous mode to %s, ret %d",
+			on ? "ON" : "OFF", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "Promiscuous mode set to %s", on ? "ON" : "OFF");
 	return 0;
 }
 
