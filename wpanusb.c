@@ -18,7 +18,6 @@
 #include <net/cfg802154.h>
 #include <net/mac802154.h>
 
-#define DEBUG
 #include "wpanusb.h"
 
 #define WPANUSB_NUM_RX_URBS	4	/* allow for a bit of local latency */
@@ -62,12 +61,25 @@ static int wpanusb_control_send(struct wpanusb *wpanusb, unsigned int pipe,
 static int wpanusb_control_recv(struct wpanusb *wpanusb, u8 request, void *data, u16 size)
 {
 	struct usb_device *udev = wpanusb->udev;
+	int ret;
 
-	usb_control_msg(udev, usb_sndctrlpipe(udev, 0), request, VENDOR_OUT,
-			       0, 0, data, size, 1000);
+	/* First send the request */
+	ret = usb_control_msg(udev, usb_sndctrlpipe(udev, 0), request, VENDOR_OUT,
+			      0, 0, NULL, 0, 1000);
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to send control request %u, ret %d", request, ret);
+		return ret;
+	}
 
-	return usb_control_msg(udev, usb_rcvbulkpipe(udev, 1), request, VENDOR_IN,
-			       0, 0, data, size, 1000);
+	/* Then receive the response */
+	ret = usb_control_msg(udev, usb_rcvctrlpipe(udev, 0), request, VENDOR_IN,
+			      0, 0, data, size, 1000);
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to receive control response %u, ret %d", request, ret);
+		return ret;
+	}
+
+	return ret;
 }
 
 /* ----- skb allocation ---------------------------------------------------- */
@@ -301,18 +313,30 @@ static int wpanusb_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
 	struct set_channel *req;
 	int ret;
 
+	/* Validate page and channel */
+	if (page >= IEEE802154_MAX_PAGE) {
+		dev_err(&udev->dev, "Invalid page %u", page);
+		return -EINVAL;
+	}
+
+	if (!(hw->phy->supported.channels[page] & BIT(channel))) {
+		dev_err(&udev->dev, "Channel %u not supported on page %u", channel, page);
+		return -EINVAL;
+	}
+
 	req = kmalloc(sizeof(*req), GFP_KERNEL);
 	if (!req)
 		return -ENOMEM;
 
-	req->page = page;
+	req->page = page;      /* Now includes page information */
 	req->channel = channel;
 
 	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
 				   SET_CHANNEL, req, sizeof(*req));
 	kfree(req);
 	if (ret < 0) {
-		dev_err(&udev->dev, "Failed set channel, ret %d", ret);
+		dev_err(&udev->dev, "Failed set channel %u on page %u, ret %d", 
+			channel, page, ret);
 		return ret;
 	}
 
@@ -456,55 +480,299 @@ static const s32 wpanusb_powers[] = {
 	-900, -1200, -1700,
 };
 
+/* Dynamic capability discovery functions */
+
+static int wpanusb_get_device_info(struct wpanusb *wpanusb, struct device_info *info)
+{
+	struct usb_device *udev = wpanusb->udev;
+	int ret;
+
+	ret = wpanusb_control_recv(wpanusb, GET_DEVICE_INFO, info, sizeof(*info));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to get device info, ret %d", ret);
+		return ret;
+	}
+
+	dev_info(&udev->dev, "Device version: %u.%u, Protocol: %u.%u",
+		 le16_to_cpu(info->device_version) >> 8,
+		 le16_to_cpu(info->device_version) & 0xFF,
+		 le16_to_cpu(info->protocol_version) >> 8,
+		 le16_to_cpu(info->protocol_version) & 0xFF);
+
+	return 0;
+}
+
+static int wpanusb_get_hardware_caps(struct wpanusb *wpanusb, struct hardware_caps *caps)
+{
+	struct usb_device *udev = wpanusb->udev;
+	int ret;
+
+	ret = wpanusb_control_recv(wpanusb, GET_HARDWARE_CAPS, caps, sizeof(*caps));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to get hardware capabilities, ret %d", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "Hardware caps: flags=0x%08x, LBT=%u, CCA=0x%02x",
+		le32_to_cpu(caps->hw_flags), caps->has_lbt, caps->has_cca_modes);
+
+	return 0;
+}
+
+static int wpanusb_get_phy_caps(struct wpanusb *wpanusb, struct phy_caps *caps)
+{
+	struct usb_device *udev = wpanusb->udev;
+	int ret;
+
+	ret = wpanusb_control_recv(wpanusb, GET_PHY_CAPS, caps, sizeof(*caps));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to get PHY capabilities, ret %d", ret);
+		return ret;
+	}
+
+	dev_dbg(&udev->dev, "PHY caps: flags=0x%08x, pages=%u, default_page=%u",
+		le32_to_cpu(caps->phy_flags), caps->supported_pages, caps->current_page);
+
+	return 0;
+}
+
+static int wpanusb_get_power_levels(struct wpanusb *wpanusb, s32 **power_levels, size_t *count)
+{
+	struct usb_device *udev = wpanusb->udev;
+	struct power_levels *levels;
+	s32 *powers;
+	int ret, i;
+	u8 max_levels = 32; /* Reasonable maximum */
+
+	/* Allocate buffer for maximum possible power levels */
+	levels = kmalloc(sizeof(*levels) + max_levels * sizeof(__le32), GFP_KERNEL);
+	if (!levels)
+		return -ENOMEM;
+
+	ret = wpanusb_control_recv(wpanusb, GET_POWER_LEVELS, levels,
+				  sizeof(*levels) + max_levels * sizeof(__le32));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to get power levels, ret %d", ret);
+		kfree(levels);
+		return ret;
+	}
+
+	if (levels->num_levels == 0 || levels->num_levels > max_levels ||
+	    levels->default_level >= levels->num_levels) {
+		dev_err(&udev->dev, "Invalid power levels count: %u or default_level: %u",
+			levels->num_levels, levels->default_level);
+		kfree(levels);
+		return -EINVAL;
+	}
+
+	/* Convert to host byte order and allocate permanent storage */
+	powers = kmalloc_array(levels->num_levels, sizeof(s32), GFP_KERNEL);
+	if (!powers) {
+		kfree(levels);
+		return -ENOMEM;
+	}
+
+	for (i = 0; i < levels->num_levels; i++) {
+		powers[i] = le32_to_cpu(levels->levels[i]);
+	}
+
+	*power_levels = powers;
+	*count = levels->num_levels;
+
+	dev_info(&udev->dev, "Found %zu power levels, default: %d mbm",
+		 *count, powers[levels->default_level]);
+
+	kfree(levels);
+	return 0;
+}
+
+static int wpanusb_get_channel_pages(struct wpanusb *wpanusb, struct ieee802154_hw *hw)
+{
+	struct usb_device *udev = wpanusb->udev;
+	struct channel_pages *pages;
+	int ret, i;
+	u8 max_pages = 8; /* IEEE 802.15.4 defines pages 0-7 */
+
+	pages = kmalloc(sizeof(*pages) + max_pages * sizeof(struct channel_page), GFP_KERNEL);
+	if (!pages)
+		return -ENOMEM;
+
+	ret = wpanusb_control_recv(wpanusb, GET_CHANNEL_PAGES, pages,
+				  sizeof(*pages) + max_pages * sizeof(struct channel_page));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to get channel pages, ret %d", ret);
+		kfree(pages);
+		return ret;
+	}
+
+	if (pages->num_pages == 0 || pages->num_pages > max_pages) {
+		dev_err(&udev->dev, "Invalid page count: %u", pages->num_pages);
+		kfree(pages);
+		return -EINVAL;
+	}
+
+	/* Configure supported channels for each page */
+	for (i = 0; i < pages->num_pages; i++) {
+		u8 page = pages->pages[i].page;
+		u32 channels = le32_to_cpu(pages->pages[i].channels_mask);
+		
+		if (page < IEEE802154_MAX_PAGE) {
+			hw->phy->supported.channels[page] = channels;
+			dev_info(&udev->dev, "Page %u: channels 0x%08x", page, channels);
+		}
+	}
+
+	/* Set current page and channel */
+	hw->phy->current_page = pages->default_page;
+	if (hw->phy->supported.channels[pages->default_page]) {
+		hw->phy->current_channel = ffs(hw->phy->supported.channels[pages->default_page]) - 1;
+	}
+
+	kfree(pages);
+	return 0;
+}
+
+static bool wpanusb_validate_capabilities(struct ieee802154_hw *hw,
+					 struct hardware_caps *hw_caps,
+					 struct phy_caps *phy_caps)
+{
+	struct usb_device *udev = ((struct wpanusb *)hw->priv)->udev;
+
+	/* Validate hardware capabilities */
+	if (hw_caps->max_frame_retries > 7) {
+		dev_warn(&udev->dev, "Invalid max frame retries: %u", 
+			 hw_caps->max_frame_retries);
+		return false;
+	}
+
+	/* Validate PHY capabilities */
+	if (phy_caps->supported_pages == 0 || phy_caps->supported_pages > 8) {
+		dev_warn(&udev->dev, "Invalid page count: %u", phy_caps->supported_pages);
+		return false;
+	}
+
+	if (phy_caps->current_page >= phy_caps->supported_pages) {
+		dev_warn(&udev->dev, "Invalid default page: %u", phy_caps->current_page);
+		return false;
+	}
+
+	return true;
+}
+
 static int wpanusb_get_device_capabilities(struct ieee802154_hw *hw)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
-	unsigned char *buffer;
-	uint32_t valid_channels;
+	struct device_info dev_info;
+	struct hardware_caps hw_caps;
+	struct phy_caps phy_caps;
+	s32 *power_levels = NULL;
+	size_t power_count = 0;
 	int ret = 0;
+	unsigned char *buffer = NULL;
+	uint32_t valid_channels;
 
-	buffer = kmalloc(IEEE802154_EXTENDED_ADDR_LEN, GFP_KERNEL);
-	if (!buffer)
-		return -ENOMEM;
-
-	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0), GET_EXTENDED_ADDR, buffer,
-					IEEE802154_EXTENDED_ADDR_LEN);
+	/* Step 1: Get basic device information */
+	ret = wpanusb_get_device_info(wpanusb, &dev_info);
 	if (ret < 0) {
-		dev_err(&udev->dev, "failed to fetch extended address, random address set\n");
-		ieee802154_random_extended_addr(&wpanusb->hw->phy->perm_extended_addr);
-		kfree(buffer);
-		return ret;
+		dev_warn(&udev->dev, "Device info query failed, using defaults");
+		goto fallback;
 	}
 
-	buffer = kmalloc(sizeof(valid_channels), GFP_NOIO);
-	if (!buffer)
-		return -ENOMEM;
-	ret = wpanusb_control_recv(wpanusb, GET_SUPPORTED_CHANNELS, buffer,	sizeof(valid_channels));
-	valid_channels = *(uint32_t *)buffer;
-	if (ret < 0 || !valid_channels) {
-		dev_err(&udev->dev, "failed to fetch valid channels, setting default valid channels\n");
+	/* Step 2: Get hardware capabilities */
+	ret = wpanusb_get_hardware_caps(wpanusb, &hw_caps);
+	if (ret < 0) {
+		dev_warn(&udev->dev, "Hardware caps query failed, using defaults");
+		goto fallback;
+	}
+
+	/* Step 3: Get PHY capabilities */
+	ret = wpanusb_get_phy_caps(wpanusb, &phy_caps);
+	if (ret < 0) {
+		dev_warn(&udev->dev, "PHY caps query failed, using defaults");
+		goto fallback;
+	}
+
+	/* Step 4: Validate capabilities */
+	if (!wpanusb_validate_capabilities(hw, &hw_caps, &phy_caps)) {
+		dev_warn(&udev->dev, "Invalid capabilities, using defaults");
+		goto fallback;
+	}
+
+	/* Step 5: Get supported power levels */
+	ret = wpanusb_get_power_levels(wpanusb, &power_levels, &power_count);
+	if (ret < 0) {
+		dev_warn(&udev->dev, "Power levels query failed, using defaults");
+		goto fallback;
+	}
+
+	/* Step 6: Get channel page information */
+	ret = wpanusb_get_channel_pages(wpanusb, hw);
+	if (ret < 0) {
+		dev_warn(&udev->dev, "Channel pages query failed, using defaults");
+		goto fallback;
+	}
+
+	/* Configure hardware flags from device capabilities */
+	hw->flags = IEEE802154_HW_TX_OMIT_CKSUM | IEEE802154_HW_AFILT;
+	
+	/* Add dynamic flags based on device capabilities */
+	if (hw_caps.has_lbt)
+		hw->flags |= IEEE802154_HW_LBT;
+	if (hw_caps.has_cca_modes)
+		hw->flags |= IEEE802154_HW_CSMA_PARAMS;
+	if (hw_caps.max_frame_retries > 0)
+		hw->flags |= IEEE802154_HW_FRAME_RETRIES;
+	if (hw_caps.has_promiscuous)
+		hw->flags |= IEEE802154_HW_PROMISCUOUS;
+
+	/* Configure PHY flags from device capabilities */
+	hw->phy->flags = le32_to_cpu(phy_caps.phy_flags);
+
+	/* Configure power levels from device */
+	hw->phy->supported.tx_powers = power_levels;
+	hw->phy->supported.tx_powers_size = power_count;
+	hw->phy->transmit_power = power_levels[0]; /* Use first (highest) power */
+
+	dev_info(&udev->dev, "Dynamic capabilities loaded successfully");
+	dev_info(&udev->dev, "HW flags: 0x%08x, PHY flags: 0x%08x", 
+		 hw->flags, hw->phy->flags);
+
+	return 0;
+
+fallback:
+	dev_info(&udev->dev, "Using fallback hardcoded capabilities");
+	
+	/* Fallback to hardcoded values */
+	hw->flags = IEEE802154_HW_TX_OMIT_CKSUM | IEEE802154_HW_AFILT;
+	hw->phy->flags = WPAN_PHY_FLAG_TXPOWER;
+	
+	/* Use hardcoded power levels */
+	hw->phy->supported.tx_powers = wpanusb_powers;
+	hw->phy->supported.tx_powers_size = ARRAY_SIZE(wpanusb_powers);
+	hw->phy->transmit_power = wpanusb_powers[0];
+
+	/* Set default channels - try to get from device first */
+	buffer = kmalloc(sizeof(valid_channels), GFP_KERNEL);
+	if (buffer) {
+		ret = wpanusb_control_recv(wpanusb, GET_SUPPORTED_CHANNELS, buffer, sizeof(valid_channels));
+		valid_channels = *(uint32_t *)buffer;
+		if (ret < 0 || !valid_channels) {
+			valid_channels = WPANUSB_VALID_CHANNELS;
+		}
+		kfree(buffer);
+	} else {
 		valid_channels = WPANUSB_VALID_CHANNELS;
 	}
 
-	/* FIXME: these need to come from device capabilities */
-	hw->flags = IEEE802154_HW_TX_OMIT_CKSUM | IEEE802154_HW_AFILT;
-
-	/* FIXME: these need to come from device capabilities */
-	hw->phy->flags = WPAN_PHY_FLAG_TXPOWER;
-
-	/* Set default and supported channels */
 	hw->phy->current_page = 0;
-	hw->phy->current_channel = ffs(valid_channels) - 1; //set to lowest valid channel
+	hw->phy->current_channel = ffs(valid_channels) - 1;
 	hw->phy->supported.channels[0] = valid_channels;
 
-	/* FIXME: these need to come from device capabilities */
-	hw->phy->supported.tx_powers = wpanusb_powers;
-	hw->phy->supported.tx_powers_size = ARRAY_SIZE(wpanusb_powers);
-	hw->phy->transmit_power = hw->phy->supported.tx_powers[0];
+	/* Clean up any allocated memory */
+	kfree(power_levels);
 
-	kfree(buffer);
-	return ret;
+	return 0; /* Return success even with fallback */
 }
 
 static int wpanusb_start(struct ieee802154_hw *hw)
@@ -548,6 +816,12 @@ static int wpanusb_set_txpower(struct ieee802154_hw *hw, s32 mbm)
 	struct set_txpower req;
 	int ret, i;
 	bool power_supported = false;
+
+	/* Check if power levels are available */
+	if (!hw->phy->supported.tx_powers || hw->phy->supported.tx_powers_size == 0) {
+		dev_err(&udev->dev, "No supported power levels available");
+		return -EOPNOTSUPP;
+	}
 
 	/* Validate power level against supported values */
 	for (i = 0; i < hw->phy->supported.tx_powers_size; i++) {
@@ -846,6 +1120,18 @@ fail:
 	return ret;
 }
 
+static void wpanusb_cleanup_dynamic_caps(struct ieee802154_hw *hw)
+{
+	/* Free dynamically allocated power levels array */
+	if (hw->phy->supported.tx_powers) {
+		/* Only free if it's not the static fallback array */
+		if (hw->phy->supported.tx_powers != wpanusb_powers) {
+			kfree(hw->phy->supported.tx_powers);
+			hw->phy->supported.tx_powers = NULL;
+		}
+	}
+}
+
 static void wpanusb_disconnect(struct usb_interface *interface)
 {
 	struct wpanusb *wpanusb = usb_get_intfdata(interface);
@@ -857,6 +1143,9 @@ static void wpanusb_disconnect(struct usb_interface *interface)
 	wpanusb_free_urbs(wpanusb);
 	usb_kill_urb(wpanusb->tx_urb);
 	usb_free_urb(wpanusb->tx_urb);
+
+	/* Clean up dynamic capabilities */
+	wpanusb_cleanup_dynamic_caps(wpanusb->hw);
 
 	ieee802154_unregister_hw(wpanusb->hw);
 
@@ -873,10 +1162,12 @@ static const struct usb_device_id wpanusb_device_table[] = {
 					      WPANUSB_PRODUCT_ID,
 					      USB_CLASS_VENDOR_SPEC,
 					      0, 0),
-                USB_DEVICE_AND_INTERFACE_INFO(BEAGLECONNECT_VENDOR_ID,
-                                                BEAGLECONNECT_PRODUCT_ID,
-                                                USB_CLASS_VENDOR_SPEC,
-                                                0, 0)
+	},
+	{
+		USB_DEVICE_AND_INTERFACE_INFO(BEAGLECONNECT_VENDOR_ID,
+					      BEAGLECONNECT_PRODUCT_ID,
+					      USB_CLASS_VENDOR_SPEC,
+					      0, 0)
 	},
 	/* end with null element */
 	{}
