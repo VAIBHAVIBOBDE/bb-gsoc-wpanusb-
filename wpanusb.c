@@ -1,3 +1,4 @@
+
 // SPDX-License-Identifier: GPL-2.0
 /*
  * Driver for the WPANUSB IEEE 802.15.4 dongle
@@ -45,6 +46,9 @@ struct wpanusb {
 	struct urb *tx_urb;
 	struct sk_buff *tx_skb;
 	u8 tx_ack_seq;			/* current TX ACK sequence number */
+
+	/* Synchronization */
+	struct mutex caps_mutex;	/* protects hardware capability updates */
 };
 
 /* ----- USB commands without data ----------------------------------------- */
@@ -310,7 +314,10 @@ static int wpanusb_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
 {
 	struct wpanusb *wpanusb = hw->priv;
 	struct usb_device *udev = wpanusb->udev;
-	struct set_channel *req;
+	struct set_channel req = {
+		.page = page,
+		.channel = channel
+	};
 	int ret;
 
 	/* Validate page and channel */
@@ -324,16 +331,8 @@ static int wpanusb_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
 		return -EINVAL;
 	}
 
-	req = kmalloc(sizeof(*req), GFP_KERNEL);
-	if (!req)
-		return -ENOMEM;
-
-	req->page = page;      /* Now includes page information */
-	req->channel = channel;
-
 	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-				   SET_CHANNEL, req, sizeof(*req));
-	kfree(req);
+				   SET_CHANNEL, &req, sizeof(req));
 	if (ret < 0) {
 		dev_err(&udev->dev, "Failed set channel %u on page %u, ret %d", 
 			channel, page, ret);
@@ -347,10 +346,21 @@ static int wpanusb_channel(struct ieee802154_hw *hw, u8 page, u8 channel)
 
 static int wpanusb_ed(struct ieee802154_hw *hw, u8 *level)
 {
+	struct wpanusb *wpanusb = hw->priv;
+	struct usb_device *udev = wpanusb->udev;
+	u8 ed_level;
+	int ret;
+
 	WARN_ON(!level);
 
-	*level = 0xbe;
+	/* Request energy detection from hardware */
+	ret = wpanusb_control_recv(wpanusb, ED, &ed_level, sizeof(ed_level));
+	if (ret < 0) {
+		dev_err(&udev->dev, "Failed to perform energy detection, ret %d", ret);
+		return ret;
+	}
 
+	*level = ed_level;
 	return 0;
 }
 
@@ -363,17 +373,12 @@ static int wpanusb_set_hw_addr_filt(struct ieee802154_hw *hw,
 	int ret = 0;
 
 	if (changed & IEEE802154_AFILT_SADDR_CHANGED) {
-		struct set_short_addr *req;
-
-		req = kmalloc(sizeof(*req), GFP_KERNEL);
-		if (!req)
-			return -ENOMEM;
-
-		req->short_addr = filt->short_addr;
+		struct set_short_addr req = {
+			.short_addr = filt->short_addr
+		};
 
 		ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-					   SET_SHORT_ADDR, req, sizeof(*req));
-		kfree(req);
+					   SET_SHORT_ADDR, &req, sizeof(req));
 		if (ret < 0) {
 			dev_err(&udev->dev, "Failed to set short_addr, ret %d",
 				ret);
@@ -385,17 +390,12 @@ static int wpanusb_set_hw_addr_filt(struct ieee802154_hw *hw,
 	}
 
 	if (changed & IEEE802154_AFILT_PANID_CHANGED) {
-		struct set_pan_id *req;
-
-		req = kmalloc(sizeof(*req), GFP_KERNEL);
-		if (!req)
-			return -ENOMEM;
-
-		req->pan_id = filt->pan_id;
+		struct set_pan_id req = {
+			.pan_id = filt->pan_id
+		};
 
 		ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-					   SET_PAN_ID, req, sizeof(*req));
-		kfree(req);
+					   SET_PAN_ID, &req, sizeof(req));
 		if (ret < 0) {
 			dev_err(&udev->dev, "Failed to set pan_id, ret %d",
 				ret);
@@ -407,18 +407,13 @@ static int wpanusb_set_hw_addr_filt(struct ieee802154_hw *hw,
 	}
 
 	if (changed & IEEE802154_AFILT_IEEEADDR_CHANGED) {
-		struct set_ieee_addr *req;
+		struct set_ieee_addr req;
 
-		req = kmalloc(sizeof(*req), GFP_KERNEL);
-		if (!req)
-			return -ENOMEM;
-
-		memcpy(&req->ieee_addr, &filt->ieee_addr,
-		       sizeof(req->ieee_addr));
+		memcpy(&req.ieee_addr, &filt->ieee_addr,
+		       sizeof(req.ieee_addr));
 
 		ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
-					   SET_IEEE_ADDR, req, sizeof(*req));
-		kfree(req);
+					   SET_IEEE_ADDR, &req, sizeof(req));
 		if (ret < 0) {
 			dev_err(&udev->dev, "Failed to set ieee_addr, ret %d",
 				ret);
@@ -429,9 +424,20 @@ static int wpanusb_set_hw_addr_filt(struct ieee802154_hw *hw,
 	}
 
 	if (changed & IEEE802154_AFILT_PANC_CHANGED) {
-		dev_dbg(&udev->dev, "panc changed");
+		struct set_panc req = {
+			.enable = filt->pan_coord ? 1 : 0
+		};
 
-		dev_err(&udev->dev, "Not handled AFILT_PANC_CHANGED");
+		ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0),
+					   SET_PANC, &req, sizeof(req));
+		if (ret < 0) {
+			dev_err(&udev->dev, "Failed to set PAN coordinator mode to %s, ret %d",
+				filt->pan_coord ? "ON" : "OFF", ret);
+			return ret;
+		}
+
+		dev_dbg(&udev->dev, "PAN coordinator mode set to %s",
+			filt->pan_coord ? "ON" : "OFF");
 	}
 
 	return ret;
@@ -474,7 +480,7 @@ static int wpanusb_set_extended_addr(struct ieee802154_hw *hw)
 	return ret;
 }
 
-/* FIXME: these need to come as capabilities from the device */
+/* Fallback power levels - used only if device capability query fails (resolved) */
 static const s32 wpanusb_powers[] = {
 	300, 280, 230, 180, 130, 70, 0, -100, -200, -300, -400, -500, -700,
 	-900, -1200, -1700,
@@ -672,6 +678,9 @@ static int wpanusb_get_device_capabilities(struct ieee802154_hw *hw)
 	unsigned char *buffer = NULL;
 	uint32_t valid_channels;
 
+	/* Protect hardware capability updates */
+	mutex_lock(&wpanusb->caps_mutex);
+
 	/* Step 1: Get basic device information */
 	ret = wpanusb_get_device_info(wpanusb, &dev_info);
 	if (ret < 0) {
@@ -735,9 +744,10 @@ static int wpanusb_get_device_capabilities(struct ieee802154_hw *hw)
 	hw->phy->transmit_power = power_levels[0]; /* Use first (highest) power */
 
 	dev_info(&udev->dev, "Dynamic capabilities loaded successfully");
-	dev_info(&udev->dev, "HW flags: 0x%08x, PHY flags: 0x%08x", 
+	dev_info(&udev->dev, "HW flags: 0x%08x, PHY flags: 0x%08x",
 		 hw->flags, hw->phy->flags);
 
+	mutex_unlock(&wpanusb->caps_mutex);
 	return 0;
 
 fallback:
@@ -772,6 +782,7 @@ fallback:
 	/* Clean up any allocated memory */
 	kfree(power_levels);
 
+	mutex_unlock(&wpanusb->caps_mutex);
 	return 0; /* Return success even with fallback */
 }
 
@@ -1063,6 +1074,7 @@ static int wpanusb_probe(struct usb_interface *interface,
 	INIT_DELAYED_WORK(&wpanusb->work, wpanusb_work_urbs);
 	init_usb_anchor(&wpanusb->idle_urbs);
 	init_usb_anchor(&wpanusb->rx_urbs);
+	mutex_init(&wpanusb->caps_mutex);
 
 	ret = wpanusb_alloc_urbs(wpanusb, WPANUSB_NUM_RX_URBS);
 	if (ret)
@@ -1148,6 +1160,9 @@ static void wpanusb_disconnect(struct usb_interface *interface)
 	wpanusb_cleanup_dynamic_caps(wpanusb->hw);
 
 	ieee802154_unregister_hw(wpanusb->hw);
+
+	/* Clean up synchronization objects */
+	mutex_destroy(&wpanusb->caps_mutex);
 
 	ieee802154_free_hw(wpanusb->hw);
 

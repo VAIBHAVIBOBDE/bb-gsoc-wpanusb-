@@ -36,9 +36,10 @@ enum wpanusb_requests {
 	SET_LBT,
 	SET_FRAME_RETRIES,
 	SET_PROMISCUOUS_MODE,
+	SET_PANC,				/* PAN Coordinator support */
 	GET_EXTENDED_ADDR,
 	GET_SUPPORTED_CHANNELS,
-	
+
 	/* New capability discovery commands */
 	GET_DEVICE_INFO,
 	GET_HARDWARE_CAPS,
@@ -95,6 +96,10 @@ struct set_csma_params {
 
 struct set_promiscuous_mode {
 	__u8 enable;        /* 0 = disable, 1 = enable promiscuous mode */
+} __packed;
+
+struct set_panc {
+	__u8 enable;        /* 0 = disable, 1 = enable PAN coordinator mode */
 } __packed;
 
 /* Device information structure */
