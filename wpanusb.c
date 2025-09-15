@@ -4,11 +4,13 @@
  * Driver for the WPANUSB IEEE 802.15.4 dongle
  *
  * Copyright (C) 2018 Intel Corp.
+ * Copyright (C) 2025 BeagleBoard.org Foundation
  *
  * The driver implements SoftMAC 802.15.4 protocol based on atusb
  * driver for ATUSB IEEE 802.15.4 dongle.
  *
  * Written by Andrei Emeltchenko <andrei.emeltchenko@intel.com>
+ * Enhanced by Manas Gupta <manasgupta3131@gmail.com>
  */
 
 #include <linux/kernel.h>
@@ -1237,6 +1239,6 @@ static struct usb_driver wpanusb_driver = {
 };
 module_usb_driver(wpanusb_driver);
 
-MODULE_AUTHOR("Andrei Emeltchenko <andrei.emeltchenko@intel.com>");
+MODULE_AUTHOR("Andrei Emeltchenko <andrei.emeltchenko@intel.com>, Manas Gupta <manasgupta3131@gmail.com>");
 MODULE_DESCRIPTION("WPANUSB IEEE 802.15.4 over USB Driver");
 MODULE_LICENSE("GPL");

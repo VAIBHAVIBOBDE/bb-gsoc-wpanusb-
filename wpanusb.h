@@ -3,8 +3,10 @@
  * Definitions shared between kernel and WPANUSB firmware
  *
  * Copyright (C) 2018 Intel Corp.
+ * Copyright (C) 2025 BeagleBoard.org Foundation
  *
  * Written by Andrei Emeltchenko <andrei.emeltchenko@intel.com>
+ * Enhanced by Manas Gupta <manasgupta3131@gmail.com>
  */
 
 #define WPANUSB_VENDOR_ID	0x2fe3
