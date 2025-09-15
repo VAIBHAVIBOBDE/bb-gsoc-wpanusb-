@@ -480,11 +480,36 @@ static int wpanusb_set_extended_addr(struct ieee802154_hw *hw)
 	return ret;
 }
 
-/* Fallback power levels - used only if device capability query fails (resolved) */
-static const s32 wpanusb_powers[] = {
-	300, 280, 230, 180, 130, 70, 0, -100, -200, -300, -400, -500, -700,
-	-900, -1200, -1700,
-};
+/* Generate fallback power levels dynamically */
+static s32 *wpanusb_generate_fallback_powers(size_t *count)
+{
+	/* Common IEEE 802.15.4 power levels in centidBm */
+	static const s32 fallback_powers[] = {
+		500,   /* +5 dBm */
+		300,   /* +3 dBm */
+		100,   /* +1 dBm */
+		0,     /*  0 dBm */
+		-100,  /* -1 dBm */
+		-300,  /* -3 dBm */
+		-500,  /* -5 dBm */
+		-1000, /* -10 dBm */
+		-1500, /* -15 dBm */
+		-2000, /* -20 dBm */
+	};
+	s32 *powers;
+	size_t num_powers = ARRAY_SIZE(fallback_powers);
+	int i;
+
+	powers = kmalloc_array(num_powers, sizeof(s32), GFP_KERNEL);
+	if (!powers)
+		return NULL;
+
+	for (i = 0; i < num_powers; i++)
+		powers[i] = fallback_powers[i];
+
+	*count = num_powers;
+	return powers;
+}
 
 /* Dynamic capability discovery functions */
 
@@ -757,10 +782,26 @@ fallback:
 	hw->flags = IEEE802154_HW_TX_OMIT_CKSUM | IEEE802154_HW_AFILT;
 	hw->phy->flags = WPAN_PHY_FLAG_TXPOWER;
 	
-	/* Use hardcoded power levels */
-	hw->phy->supported.tx_powers = wpanusb_powers;
-	hw->phy->supported.tx_powers_size = ARRAY_SIZE(wpanusb_powers);
-	hw->phy->transmit_power = wpanusb_powers[0];
+	/* Generate fallback power levels dynamically */
+	{
+		s32 *fallback_powers;
+		size_t fallback_count;
+
+		fallback_powers = wpanusb_generate_fallback_powers(&fallback_count);
+		if (fallback_powers) {
+			hw->phy->supported.tx_powers = fallback_powers;
+			hw->phy->supported.tx_powers_size = fallback_count;
+			hw->phy->transmit_power = fallback_powers[3]; /* 0 dBm default */
+			dev_info(&udev->dev, "Using dynamically generated fallback power levels (%zu levels)",
+				 fallback_count);
+		} else {
+			/* Absolute fallback - single power level */
+			hw->phy->supported.tx_powers = NULL;
+			hw->phy->supported.tx_powers_size = 0;
+			hw->phy->transmit_power = 0; /* 0 dBm */
+			dev_warn(&udev->dev, "Memory allocation failed, using single power level");
+		}
+	}
 
 	/* Set default channels - try to get from device first */
 	buffer = kmalloc(sizeof(valid_channels), GFP_KERNEL);
@@ -1136,11 +1177,10 @@ static void wpanusb_cleanup_dynamic_caps(struct ieee802154_hw *hw)
 {
 	/* Free dynamically allocated power levels array */
 	if (hw->phy->supported.tx_powers) {
-		/* Only free if it's not the static fallback array */
-		if (hw->phy->supported.tx_powers != wpanusb_powers) {
-			kfree(hw->phy->supported.tx_powers);
-			hw->phy->supported.tx_powers = NULL;
-		}
+		/* All power levels are now dynamically allocated */
+		kfree(hw->phy->supported.tx_powers);
+		hw->phy->supported.tx_powers = NULL;
+		hw->phy->supported.tx_powers_size = 0;
 	}
 }
 
