@@ -78,7 +78,7 @@ struct set_frame_retries {
 } __packed;
 
 struct set_txpower {
-	__le32 power_mbm;   /* TX power in milliwatts */
+	__le32 power_mbm;   /* TX power in mBm (1/100 dBm) */
 } __packed;
 
 struct set_cca_mode {

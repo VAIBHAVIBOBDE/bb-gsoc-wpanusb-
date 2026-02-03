@@ -458,13 +458,16 @@ static int wpanusb_set_extended_addr(struct ieee802154_hw *hw)
 	if (!buffer)
 		return -ENOMEM;
 
-	ret = wpanusb_control_send(wpanusb, usb_sndctrlpipe(udev, 0), GET_EXTENDED_ADDR, buffer,
-					IEEE802154_EXTENDED_ADDR_LEN);
+	/* Fetch the permanent extended address from the device (IN control transfer) */
+	ret = wpanusb_control_recv(wpanusb, GET_EXTENDED_ADDR, buffer,
+				   IEEE802154_EXTENDED_ADDR_LEN);
 	if (ret < 0) {
-		dev_err(&udev->dev, "failed to fetch extended address, random address set\n");
+		/* Fall back to a random extended address but keep the driver operational */
+		dev_warn(&udev->dev,
+			 "failed to fetch permanent extended address, using random address\n");
 		ieee802154_random_extended_addr(&wpanusb->hw->phy->perm_extended_addr);
 		kfree(buffer);
-		return ret;
+		return 0;
 	}
 
 	memcpy(&extended_addr, buffer, IEEE802154_EXTENDED_ADDR_LEN);
